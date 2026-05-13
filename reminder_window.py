@@ -152,7 +152,9 @@ class ReminderWindow(QWidget):
             "angry": "angry miku.jpg"
         }
         filename = mapping.get(state, "initial prompt.jpg")
-        path = os.path.join("assests", "prompt", filename)
+        # Use absolute path for PyInstaller compatibility
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(script_dir, "assests", "prompt", filename)
         if os.path.exists(path):
             pixmap = QPixmap(path)
             self.mascot_label.setPixmap(pixmap.scaled(200, 200, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))

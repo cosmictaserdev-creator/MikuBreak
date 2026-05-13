@@ -19,7 +19,7 @@ def resource_path(relative_path):
         # PyInstaller creates a temp folder and stores path in _MEIPASS
         base_path = sys._MEIPASS
     except Exception:
-        base_path = os.path.abspath(".")
+        base_path = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base_path, relative_path)
 
 class ScreenPalApp:
@@ -160,12 +160,12 @@ class ScreenPalApp:
 
     def setup_tray(self):
         self.tray_icon = QSystemTrayIcon(self.app)
-        icon_path = os.path.join(os.path.dirname(__file__), "assests", "appIcon.png")
+        icon_path = resource_path(os.path.join("assests", "appIcon.png"))
         if os.path.exists(icon_path):
             self.tray_icon.setIcon(QIcon(icon_path))
         else:
             # Fallback to secondary icon
-            secondary_path = os.path.join(os.path.dirname(__file__), "assests", "img", "icon.png")
+            secondary_path = resource_path(os.path.join("assests", "img", "icon.png"))
             if os.path.exists(secondary_path):
                 self.tray_icon.setIcon(QIcon(secondary_path))
             else:
