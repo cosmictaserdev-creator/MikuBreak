@@ -64,8 +64,9 @@ pyinstaller --noconsole --onefile --name "mikuBreak" --icon "assests/appIcon.png
 ```
 
 ## 🎨 Credits & Assets
-- **Mascot Sprites:** Inspired by the MiniMiko animations.
-- **Theme:** Cyber-Cute / Tokyonight inspired aesthetics.
+This project is licensed under the **MIT License** (see [LICENSE](LICENSE) for details).
+
+Mascot sprites are created by **digitalromance**. For full asset attributions and third-party credits, please see [CREDITS.md](CREDITS.md).
 
 ---
 *Miku is watching over your PC! Go relax and stretch! 🌸*
