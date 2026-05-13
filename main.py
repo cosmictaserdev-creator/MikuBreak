@@ -13,6 +13,15 @@ from timer_manager import TimerManager
 from reminder_window import ReminderWindow
 from settings_window import SettingsWindow
 
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
 class ScreenPalApp:
     def __init__(self):
         self.app = QApplication(sys.argv)
@@ -84,7 +93,7 @@ class ScreenPalApp:
         self.mascot.update_timer_display(initial_seconds)
 
     def load_fonts(self):
-        font_dir = os.path.join(os.path.dirname(__file__), "font", "DM_Serif_Display")
+        font_dir = resource_path(os.path.join("font", "DM_Serif_Display"))
         regular_path = os.path.join(font_dir, "DMSerifDisplay-Regular.ttf")
         italic_path = os.path.join(font_dir, "DMSerifDisplay-Italic.ttf")
         
@@ -101,29 +110,53 @@ class ScreenPalApp:
         
         # If user is supposed to be on break but is using the PC
         if self.is_on_break and self.reminder:
+            # If the user is dragging the mascot, don't trigger "Angry Miku" behavior changes
+            if self.mascot.dragging:
+                if hasattr(self, "angry_trigger_timer"):
+                    self.angry_trigger_timer.stop()
+                return
+
             if is_active:
-                # Start a timer to trigger "Angry Miku" after 5 seconds of continuous activity
-                if not hasattr(self, 'angry_timer'):
-                    self.angry_timer = QTimer()
-                    self.angry_timer.setSingleShot(True)
-                    self.angry_timer.timeout.connect(self.trigger_angry_miku)
+                # If we are already in angry/smart mode, don't restart the trigger timer
+                if getattr(self, "is_currently_angry", False):
+                    return
+
+                # Start a timer to trigger "Angry Miku" after 2 seconds of continuous activity
+                if not hasattr(self, "angry_trigger_timer"):
+                    self.angry_trigger_timer = QTimer()
+                    self.angry_trigger_timer.setSingleShot(True)
+                    self.angry_trigger_timer.timeout.connect(self.trigger_angry_miku)
                 
-                if not self.angry_timer.isActive():
-                    self.angry_timer.start(5000) # 5 seconds threshold
+                if not self.angry_trigger_timer.isActive():
+                    self.angry_trigger_timer.start(2000) # 2 seconds threshold
             else:
-                # User stopped, cancel angry timer and return to relaxed
-                if hasattr(self, 'angry_timer'):
-                    self.angry_timer.stop()
+                # User stopped, cancel trigger timer
+                if hasattr(self, "angry_trigger_timer"):
+                    self.angry_trigger_timer.stop()
                 
-                choice = random.choice(["sitting", "sleeping"])
-                self.mascot.set_state(choice)
-                self.reminder.set_angry_mode(False)
+                # If they weren't already angry, ensure they stay in a relaxed state
+                if not getattr(self, "is_currently_angry", False):
+                    choice = random.choice(["sitting", "sleeping"])
+                    self.mascot.set_state(choice)
+                    self.reminder.set_angry_mode(False)
 
     def trigger_angry_miku(self):
         """Actually switches mascot and window to angry state."""
         if self.is_on_break and self.reminder and self.tracker.is_active:
+            self.is_currently_angry = True
             self.mascot.set_state("pulling")
             self.reminder.set_angry_mode(True)
+            
+            # Start a timer to revoke angry mode after 10 seconds as requested
+            QTimer.singleShot(10000, self.revoke_angry_mode)
+
+    def revoke_angry_mode(self):
+        """Returns to relaxed state during break after 10 seconds of angry mode."""
+        self.is_currently_angry = False
+        if self.is_on_break and self.reminder:
+            self.reminder.set_angry_mode(False)
+            choice = random.choice(["sitting", "sleeping"])
+            self.mascot.set_state(choice)
 
     def setup_tray(self):
         self.tray_icon = QSystemTrayIcon(self.app)
@@ -189,6 +222,11 @@ class ScreenPalApp:
         if self.is_on_break:
             return
 
+        # Cooldown: Don't trigger another reminder if one just finished (within 30s)
+        import time
+        if hasattr(self, "last_break_end_time") and (time.time() - self.last_break_end_time < 30):
+            return
+
         # If user is currently dragging Miku, wait for release before starting sequence
         if self.mascot.dragging:
             QTimer.singleShot(1000, self.start_reminder_sequence)
@@ -233,6 +271,7 @@ class ScreenPalApp:
             
         elif action == "break":
             self.is_on_break = True
+            self.is_currently_angry = False
             self.timer_manager.stop() # Stop tracking work time during break
             
             # Immediately check if the user is active to show "Angry Miku" if needed
@@ -253,10 +292,14 @@ class ScreenPalApp:
 
     def handle_break_finished(self):
         """Phase 4: Break is over, mascot returns home."""
+        import time
         self.is_on_break = False
+        self.is_currently_angry = False
+        self.last_break_end_time = time.time()
         self.timer_manager.reset() # Start tracking again after break
         # We wait a bit so the user can see the "Good boy" message
         QTimer.singleShot(5000, self.walk_back)
+
 
     def walk_back(self):
         # Prefer returning home to the actual corner (anchor_x)

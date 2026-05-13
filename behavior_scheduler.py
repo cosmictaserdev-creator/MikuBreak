@@ -322,7 +322,7 @@ class BehaviorScheduler(QObject):
         self.hold_timer.stop()
         
         # Continuous loop for movement/dialog behaviors
-        if self.current_behavior_name in ["walk", "run", "dialog"]:
+        if self.current_behavior_name in ["walk", "run", "dialog", "dialog_holding"]:
             self._play_behavior(self.current_behavior)
             return
 

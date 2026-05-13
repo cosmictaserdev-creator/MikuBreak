@@ -172,12 +172,12 @@ class MascotWindow(QWidget):
 
         # Roaming Logic: If idle and scheduler picks "walk", start roaming
         if name == "walk" and not self.dragging and not self.fall_timer.isActive():
-            if not hasattr(self, "_is_roaming") or not self._is_roaming:
+            if not getattr(self, "_is_roaming", False):
                 QTimer.singleShot(100, self._start_roaming)
 
         # Reposition window if not dragging or falling
         if not self.dragging and not self.fall_timer.isActive():
-            geom = QApplication.primaryScreen().availableGeometry()
+            geom = self.screen().availableGeometry()
             target_y = geom.bottom() - self.height() + self.behavior_y_offset
             self._apply_position_clamping(QPoint(self.x(), target_y))
 
@@ -186,13 +186,14 @@ class MascotWindow(QWidget):
         if getattr(self, "_is_roaming", False): return
         self._is_roaming = True
         
-        geom = QApplication.primaryScreen().availableGeometry()
+        geom = self.screen().availableGeometry()
         roam_dist = random.randint(150, 400)
         direction = 1 if self.x() < geom.center().x() else -1
         
         walk_target = self.x() + (direction * roam_dist * 0.3)
         run_target = self.x() + (direction * roam_dist)
         
+        # Clamp to current screen bounds
         walk_target = max(geom.left() + 20, min(walk_target, geom.right() - self.width() - 20))
         run_target = max(geom.left() + 20, min(run_target, geom.right() - self.width() - 20))
 
@@ -271,6 +272,7 @@ class MascotWindow(QWidget):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self.dragging = True
+            self.is_falling = False # Reset falling state if caught
             self.drag_start_pos = event.globalPosition().toPoint()
             self.last_mouse_pos = event.globalPosition().toPoint()
             self.relative_drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
@@ -301,16 +303,15 @@ class MascotWindow(QWidget):
                 self._show_static_frame("drag", "drag_holding.png")
 
             self.last_mouse_pos = current_pos
-            # Removed scheduler.update_activity() to prevent walking while dragging
             event.accept()
 
     def _apply_position_clamping(self, target_pos):
-        geom = QApplication.primaryScreen().availableGeometry()
+        geom = self.screen().availableGeometry()
         max_y = geom.bottom() - self.height() + self.behavior_y_offset
         clamped_x = max(geom.left(), min(target_pos.x(), geom.right() - self.width()))
         clamped_y = max(geom.top(), min(target_pos.y(), max_y))
         
-        if clamped_x < 50: self.current_direction = "right"
+        if clamped_x < geom.left() + 50: self.current_direction = "right"
         elif clamped_x > geom.right() - self.width() - 50: self.current_direction = "left"
         
         self.move(clamped_x, clamped_y)
@@ -334,7 +335,7 @@ class MascotWindow(QWidget):
         self.fall_timer.start(10)
 
     def _fall_step(self):
-        geom = QApplication.primaryScreen().availableGeometry()
+        geom = self.screen().availableGeometry()
         ground_y = geom.bottom() - self.height() + self.behavior_y_offset
         dist_remaining = ground_y - self.y()
         
@@ -355,13 +356,20 @@ class MascotWindow(QWidget):
             QTimer.singleShot(500, self._on_landed)
 
     def _on_landed(self):
+        """Transition to sleep after landing. Roaming logic will return her to corner later."""
+        if self.dragging: return # Don't sleep if we were caught mid-air
+        
         self.is_falling = False
         self.scheduler.force_behavior("sleeping")
-        QTimer.singleShot(1000, self._return_to_nearest_corner)
+        
+        # Stay sleeping for a while (10s) then let the scheduler resume normal rotation.
+        # If she is far from her side, the next walk will trigger the auto-return roaming.
+        QTimer.singleShot(10000, lambda: self.scheduler.start() if not self.dragging else None)
+
 
     def _return_to_nearest_corner(self):
         """Homing: walk then run back."""
-        geom = QApplication.primaryScreen().availableGeometry()
+        geom = self.screen().availableGeometry()
         dist_left = self.x() - geom.left()
         dist_right = geom.right() - self.width() - self.x()
         
@@ -403,7 +411,7 @@ class MascotWindow(QWidget):
         self.scheduler.force_behavior("pulling")
         def walk_away():
             target_x = self.x() - 150
-            geom = QApplication.primaryScreen().availableGeometry()
+            geom = self.screen().availableGeometry()
             target_x = max(geom.left() + 20, target_x)
             self.walk_to(target_x, walk_back)
         def walk_back():
@@ -416,9 +424,9 @@ class MascotWindow(QWidget):
             self.set_frame(QPixmap(path))
 
     def update_position(self):
-        geom = QApplication.primaryScreen().availableGeometry()
-        self.anchor_x = geom.width() - self.width() - 50
-        self.move(self.anchor_x, geom.height() - self.height())
+        geom = self.screen().availableGeometry()
+        self.anchor_x = geom.right() - self.width() - 50
+        self.move(self.anchor_x, geom.bottom() - self.height())
 
     def set_state(self, state, direction="left"):
         self.current_direction = direction
@@ -426,8 +434,14 @@ class MascotWindow(QWidget):
         else: self.scheduler.force_behavior(state)
 
     def walk_to(self, target_x, callback=None, speed=5, state="walk"):
-        self.target_x, self.move_callback = int(target_x), callback
-        self.current_direction = "left" if target_x < self.x() else "right"
+        # CLAMP target_x to screen bounds to avoid infinite walk loops at edges
+        geom = self.screen().availableGeometry()
+        min_x = geom.left()
+        max_x = geom.right() - self.width()
+        self.target_x = max(min_x, min(int(target_x), max_x))
+        
+        self.move_callback = callback
+        self.current_direction = "left" if self.target_x < self.x() else "right"
         self.scheduler.force_behavior(state)
         
         if hasattr(self, "_move_timer") and self._move_timer.isActive():
@@ -437,13 +451,12 @@ class MascotWindow(QWidget):
         self._move_timer.start(20)
 
     def reset_roaming(self):
-        """Forcefully stop roaming sequence and allow new idle picks."""
+        """Forcefully stop roaming sequence. Does NOT restart scheduler to avoid race conditions."""
         self._is_roaming = False
-        self.dragging = False # Ensure drag state is also reset if needed
+        self.dragging = False
         if hasattr(self, "_move_timer"):
             self._move_timer.stop()
-        self.scheduler.stop() # Stop any current idle animation
-        self.scheduler.start() # Reset scheduler to fresh state
+        self.scheduler.stop()
 
     def _move_step(self, speed):
         if abs(self.x() - self.target_x) <= speed:
@@ -451,7 +464,14 @@ class MascotWindow(QWidget):
             self._move_timer.stop()
             if self.move_callback: self.move_callback()
         else:
+            prev_x = self.x()
             self.move(self.x() + (speed if self.target_x > self.x() else -speed), self.y())
+            
+            # Safety: If move failed (stuck at edge or OS-blocked), stop walking
+            if self.x() == prev_x:
+                self._move_timer.stop()
+                if self.move_callback: self.move_callback()
+
 
     def start_dialog_mode(self):
         self.scheduler.start_dialog_animation()

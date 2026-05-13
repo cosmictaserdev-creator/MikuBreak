@@ -7,8 +7,12 @@ class SpriteLoader:
     Loads and manages PNG sprite frames for the mascot using descriptive folder structure.
     """
     
-    def __init__(self, assets_dir="assests/img"):
-        self.assets_dir = assets_dir
+    def __init__(self, assets_dir=None):
+        if assets_dir is None:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            self.assets_dir = os.path.join(script_dir, "assests", "img")
+        else:
+            self.assets_dir = assets_dir
         # Map logical states to relative file paths within the assets folder
         self.mapping = {
             "idle": [

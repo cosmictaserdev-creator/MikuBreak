@@ -50,9 +50,12 @@ class ReminderWindow(QWidget):
         self.card.setGeometry(0, 0, 600, 500)
         
         # Background Setup
-        bg_path = os.path.join("assests", "bg.jpg")
+        # Use absolute paths for PyInstaller compatibility
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        bg_path = os.path.join(script_dir, "assests", "bg.jpg")
         bg_style = ""
         if os.path.exists(bg_path):
+            # Normalize path for CSS
             safe_bg_path = bg_path.replace("\\", "/")
             # Use background-image + cover-like styling for better radius support
             bg_style = f"""
