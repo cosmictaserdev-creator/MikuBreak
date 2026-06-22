@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QPushButton, QFrame, QCheckBox
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
-from PyQt6.QtGui import QPixmap, QPalette, QBrush
+from PyQt6.QtGui import QPixmap, QPalette, QBrush, QIcon
 from config import ConfigManager
 import os
 import sys
@@ -16,6 +16,7 @@ class SettingsWindow(QWidget):
         self.config = config
         
         self.setWindowTitle("mikuBreak Control Room")
+        self.setWindowIcon(QIcon("assests/appIcon.png"))
         self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint)
         self.setFixedSize(500, 680) # Increased height for startup toggle
         
@@ -95,6 +96,11 @@ class SettingsWindow(QWidget):
             QPushButton#cancelBtn {
                 background-color: #3a3e6d;
                 color: #959bb5;
+                border: none;
+                padding: 12px;
+                border-radius: 15px;
+                font-weight: 900;
+                font-size: 14px;
             }
         """)
         
@@ -174,6 +180,11 @@ class SettingsWindow(QWidget):
         self.startup_check = QCheckBox("Run mikuBreak on system startup")
         self.startup_check.setChecked(self.config.get("run_at_startup"))
         layout.addWidget(self.startup_check)
+
+        # Do Not Disturb
+        self.dnd_check = QCheckBox("Do Not Disturb ~ Miku won't bug you")
+        self.dnd_check.setChecked(self.config.get("dnd_enabled"))
+        layout.addWidget(self.dnd_check)
         
         # Interaction Tip
         tip_label = QLabel("✨ Tip: Press Control + Click to interact or drag Miku!")
@@ -213,6 +224,9 @@ class SettingsWindow(QWidget):
         startup_enabled = self.startup_check.isChecked()
         self.config.set("run_at_startup", startup_enabled)
         self.handle_startup_registry(startup_enabled)
+
+        dnd_enabled = self.dnd_check.isChecked()
+        self.config.set("dnd_enabled", dnd_enabled)
         
         # Show Confirmation
         self.save_btn.setText("SAVED SUCCESSFULLY! ✨")
@@ -223,6 +237,7 @@ class SettingsWindow(QWidget):
             padding: 12px;
             border-radius: 15px;
             font-weight: 900;
+            font-size: 14px;
         """)
         
         # Emit signal for other components to react

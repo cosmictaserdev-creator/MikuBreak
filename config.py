@@ -9,7 +9,8 @@ class ConfigManager:
         "snooze_duration_min": 10,
         "break_duration_min": 1,
         "is_paused": False,
-        "run_at_startup": False
+        "run_at_startup": False,
+        "dnd_enabled": False
     }
     
     def __init__(self, config_path="config.json"):

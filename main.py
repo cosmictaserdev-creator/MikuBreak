@@ -41,7 +41,11 @@ class ScreenPalApp:
         self.load_fonts()
         
         # Initialize Managers (Order is important!)
-        self.config = ConfigManager()
+        if getattr(sys, 'frozen', False):
+            base_path = os.path.dirname(sys.executable)
+        else:
+            base_path = os.path.dirname(os.path.abspath(__file__))
+        self.config = ConfigManager(config_path=os.path.join(base_path, "config.json"))
         self.loader = SpriteLoader()
         
         # UI Components
@@ -215,6 +219,10 @@ class ScreenPalApp:
     def start_reminder_sequence(self):
         """Phase 1: Mascot walks/runs to center while playing dialog animation."""
         
+        # DND: skip reminder entirely
+        if self.config.get("dnd_enabled"):
+            return
+
         # SAFETY: If a reminder is already visible or we are on break, ignore
         if self.reminder and self.reminder.isVisible():
             return
