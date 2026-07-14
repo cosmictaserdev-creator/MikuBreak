@@ -58,11 +58,24 @@ class ScreenPalApp:
         # Initialize Managers (Order is important!)
         if getattr(sys, 'frozen', False):
             base_path = os.path.dirname(sys.executable)
+            # Program Files is ACL-locked for standard users -- config.json/
+            # miku_memory.db must live in per-user AppData, not next to the exe.
+            data_path = os.path.join(os.environ["LOCALAPPDATA"], "MikuBreak")
+            os.makedirs(data_path, exist_ok=True)
+            for fname in ("config.json", "miku_memory.db"):
+                old_file = os.path.join(base_path, fname)
+                new_file = os.path.join(data_path, fname)
+                if os.path.exists(old_file) and not os.path.exists(new_file):
+                    try:
+                        os.replace(old_file, new_file)
+                    except OSError:
+                        pass
         else:
             base_path = os.path.dirname(os.path.abspath(__file__))
-        self.config = ConfigManager(config_path=os.path.join(base_path, "config.json"))
+            data_path = base_path
+        self.config = ConfigManager(config_path=os.path.join(data_path, "config.json"))
         self.loader = SpriteLoader()
-        self.store = MemoryStore(db_path=os.path.join(base_path, "miku_memory.db"))
+        self.store = MemoryStore(db_path=os.path.join(data_path, "miku_memory.db"))
 
         # UI Components
         self.mascot = MascotWindow(self.loader, self.config)
