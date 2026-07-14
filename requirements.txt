@@ -2,3 +2,10 @@ PyQt6
 pynput
 pyinstaller
 Pillow
+groq
+openai
+edge-tts
+mss
+uiautomation
+sounddevice
+numpy

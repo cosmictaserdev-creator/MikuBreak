@@ -1,8 +1,9 @@
 import os
 import sys
+import time
 import random
 from PyQt6.QtWidgets import QWidget, QLabel, QApplication, QFrame
-from PyQt6.QtCore import Qt, QTimer, QPoint, QSize
+from PyQt6.QtCore import Qt, QTimer, QPoint, QSize, pyqtSignal
 from PyQt6.QtGui import QPixmap, QTransform, QGuiApplication
 from behavior_scheduler import BehaviorScheduler
 
@@ -11,8 +12,16 @@ class MascotWindow(QWidget):
     Refined mascot window with complex physics, distance-based drop animations,
     intelligent corner returning, and roaming idle behavior.
     """
-    def __init__(self, sprite_loader=None):
+
+    shake_detected = pyqtSignal()  # fast direction-reversal while dragging
+    shake_resolved = pyqtSignal()  # drag released + grace period elapsed
+    moved = pyqtSignal()  # fires every time the window's position actually changes
+    file_dropped = pyqtSignal(str)  # user dropped a file from Explorer onto the mascot
+
+    def __init__(self, sprite_loader=None, config=None):
         super().__init__()
+        self.config = config
+        self.setAcceptDrops(True)
         self.MASCOT_SIZE = 128
         self.TIMER_HEIGHT = 30
         self.BUBBLE_W = 76
@@ -50,6 +59,7 @@ class MascotWindow(QWidget):
             }
         """)
         self.timer_label.setText("--:--")
+        self.timer_label.hide()  # superseded by the floating MikuPill, which anchors to this same spot
 
         self.label = QLabel(self)
         self.label.setGeometry(0, self.TIMER_HEIGHT, self.MASCOT_SIZE, self.MASCOT_SIZE)
@@ -80,10 +90,15 @@ class MascotWindow(QWidget):
         self._is_roaming = False
         self.behavior_y_offset = 0
         self.drop_frames_cycled = 0
-        
+
+        # Shake-to-pause tracking
+        self._shake_reversals = []
+        self._last_shake_sign = None
+        self._shake_active = False
+
         # Anchor point for roaming returning
         self.anchor_x = 0
-        
+
         # Timers
         self.drag_still_timer = QTimer()
         self.drag_still_timer.timeout.connect(self._on_drag_still)
@@ -247,6 +262,19 @@ class MascotWindow(QWidget):
         self._is_roaming = False
         self.scheduler.start()
 
+    # -- file drops --------------------------------------------------------
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls() and any(u.isLocalFile() for u in event.mimeData().urls()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        for url in event.mimeData().urls():
+            if url.isLocalFile():
+                self.file_dropped.emit(url.toLocalFile())
+                event.acceptProposedAction()
+                return
+
     def set_frame(self, pixmap):
         if pixmap.isNull(): return
         scaled = pixmap.scaled(self.MASCOT_SIZE, self.MASCOT_SIZE, 
@@ -285,6 +313,10 @@ class MascotWindow(QWidget):
             SWP_FRAMECHANGED = 0x0020
             user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED)
 
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self.moved.emit()
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self._undock(fall=False)
@@ -294,7 +326,11 @@ class MascotWindow(QWidget):
             self.drag_start_pos = event.globalPosition().toPoint()
             self.last_mouse_pos = event.globalPosition().toPoint()
             self.relative_drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            
+
+            self._shake_reversals = []
+            self._last_shake_sign = None
+            self._shake_active = False
+
             self.scheduler.stop()
             self.fall_timer.stop()
             if hasattr(self, "_move_timer"): self._move_timer.stop()
@@ -313,6 +349,7 @@ class MascotWindow(QWidget):
             self._apply_position_clamping(new_pos)
 
             if abs(dx) > 3:
+                self._track_shake(dx)
                 self.drag_still_timer.stop()
                 self.current_direction = "left" if dx < 0 else "right"
                 self._show_static_frame("drag", "dragging_left.png" if dx < 0 else "dragging_right.png")
@@ -322,6 +359,22 @@ class MascotWindow(QWidget):
 
             self.last_mouse_pos = current_pos
             event.accept()
+
+    def _track_shake(self, dx):
+        """Shake = N fast direction-reversals within a short window, not just any drag."""
+        now = time.time() * 1000
+        sign = 1 if dx > 0 else -1
+        if self._last_shake_sign is not None and sign != self._last_shake_sign:
+            self._shake_reversals.append(now)
+        self._last_shake_sign = sign
+
+        window_ms = 700
+        self._shake_reversals = [t for t in self._shake_reversals if now - t <= window_ms]
+
+        threshold = self.config.get("shake_reversal_threshold") if self.config else 4
+        if not self._shake_active and len(self._shake_reversals) >= threshold:
+            self._shake_active = True
+            self.shake_detected.emit()
 
     def _apply_position_clamping(self, target_pos):
         geom = self.screen().availableGeometry()
@@ -350,7 +403,16 @@ class MascotWindow(QWidget):
                 else:
                     self.is_falling = True
                     self._start_fall()
+
+            if self._shake_active:
+                grace_ms = self.config.get("shake_grace_period_ms") if self.config else 1200
+                QTimer.singleShot(grace_ms, self._resolve_shake)
+
             event.accept()
+
+    def _resolve_shake(self):
+        self._shake_active = False
+        self.shake_resolved.emit()
 
     def _start_fall(self):
         """Visual fall with distance-based frame cycling."""

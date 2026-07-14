@@ -3,7 +3,7 @@ import os
 import random
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
 from PyQt6.QtGui import QIcon, QFontDatabase
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QTimer, QSharedMemory
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from mascot_window import MascotWindow
 from sprite_loader import SpriteLoader
@@ -12,6 +12,13 @@ from activity_tracker import ActivityTracker
 from timer_manager import TimerManager
 from reminder_window import ReminderWindow
 from settings_window import SettingsWindow
+from chat_controller import ChatController
+from memory.store import MemoryStore
+from memory_scheduler import MemoryScheduler
+from screen_guide import ScreenGuideController
+from pill import MikuPill
+from idle_chatter import IdleChatter
+from dictation import DictationController
 
 def resource_path(relative_path):
     """ Get absolute path to resource, works for dev and for PyInstaller """
@@ -28,15 +35,22 @@ class ScreenPalApp:
         self.app.setApplicationName("mikuBreak")
         self.app.setQuitOnLastWindowClosed(False)
         
-        # Single Instance Enforcement
+        # Single Instance Enforcement. QLocalServer.listen() alone isn't a real mutex on
+        # Windows (named pipes allow multiple listeners on the same name), so the actual
+        # lock is a QSharedMemory segment; QLocalServer is only used to message the
+        # survivor. If the segment already exists, another instance owns it.
         self.instance_name = "mikuBreak_unique_id"
-        if self.check_existing_instance():
-             sys.exit(0)
-             
+        self.singleton_lock = QSharedMemory("mikuBreak_singleton_lock")
+        if not self.singleton_lock.create(1):
+            self.notify_existing_instance()
+            if not self.singleton_lock.create(1):
+                sys.exit(0)  # old instance didn't release the lock in time
+
         self.server = QLocalServer(self.app)
         self.server.newConnection.connect(self.handle_new_instance)
+        QLocalServer.removeServer(self.instance_name)  # clear a stale pipe registration from a crashed run
         self.server.listen(self.instance_name)
-        
+
         # Register Custom Fonts
         self.load_fonts()
         
@@ -47,12 +61,29 @@ class ScreenPalApp:
             base_path = os.path.dirname(os.path.abspath(__file__))
         self.config = ConfigManager(config_path=os.path.join(base_path, "config.json"))
         self.loader = SpriteLoader()
-        
+        self.store = MemoryStore(db_path=os.path.join(base_path, "miku_memory.db"))
+
         # UI Components
-        self.mascot = MascotWindow(self.loader)
-        
+        self.mascot = MascotWindow(self.loader, self.config)
+        self.mascot.shake_detected.connect(self.handle_shake_detected)
+        self.mascot.shake_resolved.connect(self.handle_shake_resolved)
+        # file_dropped connected after chat_controller exists (below)
+        self.pill = MikuPill(self.mascot)
+        self.chat_controller = ChatController(self.config, self.mascot, self.store, self.pill)
+        self.mascot.file_dropped.connect(self.chat_controller.handle_file_drop)
+        self.screen_guide = ScreenGuideController(self.config, self.mascot, self.store, self.pill, chat_controller=self.chat_controller)
+        self.memory_scheduler = MemoryScheduler(self.store, self.chat_controller)
+        self.memory_scheduler.start()
+        self.idle_chatter = IdleChatter(self.config, self.chat_controller)
+        self.idle_chatter.start()
+        self.dictation = DictationController(self.config, mascot=self.mascot, pill=self.pill)
+        self._interrupted_nudge = None
+
         # Set initial timer display after a small delay to ensure UI is ready
         QTimer.singleShot(200, self.set_initial_timer)
+
+        # First launch of the day: short good-morning recap (reminders, habits)
+        QTimer.singleShot(8000, self.maybe_daily_recap)
         
         self.reminder = None
         self.settings_window = None
@@ -66,22 +97,21 @@ class ScreenPalApp:
         self.tracker.activity_detected.connect(self.handle_activity_change)
         self.timer_manager.reminder_triggered.connect(self.start_reminder_sequence)
         self.timer_manager.second_elapsed.connect(self.mascot.update_timer_display)
+        self.timer_manager.second_elapsed.connect(self.update_pill_countdown)
         
         self.setup_tray()
 
-    def check_existing_instance(self):
-        """Checks for an existing instance and tells it to quit."""
+    def notify_existing_instance(self):
+        """We lost the race for the server name -- tell whoever holds it to quit."""
         socket = QLocalSocket()
         socket.connectToServer(self.instance_name)
         if socket.waitForConnected(500):
             socket.write(b"QUIT")
             socket.waitForBytesWritten(500)
             socket.disconnectFromServer()
-            # Wait a bit for the old one to die
+            # Wait for the old one to actually release the server name
             import time
             time.sleep(1)
-            return False 
-        return False
 
     def handle_new_instance(self):
         """Called in the OLD instance when a new one tries to start."""
@@ -95,6 +125,10 @@ class ScreenPalApp:
         """Sets the starting countdown value on the mascot."""
         initial_seconds = int(self.config.get("reminder_interval_min") * 60)
         self.mascot.update_timer_display(initial_seconds)
+        self.update_pill_countdown(initial_seconds)
+
+    def update_pill_countdown(self, remaining_seconds):
+        self.pill.show_countdown(remaining_seconds)
 
     def load_fonts(self):
         font_dir = resource_path(os.path.join("font", "DM_Serif_Display"))
@@ -185,7 +219,12 @@ class ScreenPalApp:
         self.pause_action.setCheckable(True)
         self.pause_action.setChecked(self.config.get("is_paused"))
         self.pause_action.triggered.connect(self.toggle_pause)
-        
+
+        self.mute_action = tray_menu.addAction("Mute Voice")
+        self.mute_action.setCheckable(True)
+        self.mute_action.setChecked(self.config.get("muted"))
+        self.mute_action.triggered.connect(self.toggle_mute)
+
         tray_menu.addSeparator()
         
         quit_action = tray_menu.addAction("Quit")
@@ -197,11 +236,16 @@ class ScreenPalApp:
     def quit_app(self):
         """Clean shutdown of threads and app."""
         self.tracker.stop()
+        self.chat_controller.stop()
+        self.screen_guide.stop()
+        self.memory_scheduler.stop()
+        self.idle_chatter.stop()
+        self.dictation.stop()
         self.app.quit()
 
     def show_settings(self):
         if not self.settings_window:
-            self.settings_window = SettingsWindow(self.config)
+            self.settings_window = SettingsWindow(self.config, self.store)
             self.settings_window.settings_changed.connect(self.handle_settings_change)
         self.settings_window.show()
         self.settings_window.raise_()
@@ -212,9 +256,49 @@ class ScreenPalApp:
         # Force an immediate UI update with the new setting
         self.set_initial_timer()
 
+    def maybe_daily_recap(self):
+        """Once per calendar day, on first launch: Miku greets with today's reminders/habits."""
+        if not self.config.get("daily_recap_enabled") or not self.config.get("groq_api_key"):
+            return
+        import datetime
+        today = datetime.date.today().isoformat()
+        if self.config.get("last_recap_date") == today:
+            return
+        if self.mascot.dragging or not self.pill.is_idle():
+            QTimer.singleShot(60000, self.maybe_daily_recap)  # busy — try again in a minute
+            return
+        self.config.set("last_recap_date", today)
+        self.chat_controller.handle_prompt(
+            "Greet the user for the start of their day. If your context lists reminders or "
+            "tracked habits for today, mention them briefly; otherwise just a warm one-line "
+            "hello. Two or three short sentences max."
+        )
+
     def toggle_pause(self):
         is_paused = self.pause_action.isChecked()
         self.config.set("is_paused", is_paused)
+
+    def toggle_mute(self):
+        muted = self.mute_action.isChecked()
+        self.config.set("muted", muted)
+
+    def handle_shake_detected(self):
+        """Shake-to-pause: interrupt whatever she's doing, play a startled beat."""
+        interrupted = self.chat_controller.interrupt()
+        if interrupted:
+            self._interrupted_nudge = interrupted
+        self.screen_guide.player.stop()
+        # ponytail: no dedicated startled/dizzy sprite frames exist yet — reuse the
+        # single "turn" frame as a quick flinch. Swap in real frames if art shows up.
+        self.mascot.set_state("turn")
+
+    def handle_shake_resolved(self):
+        """Drag released + grace period elapsed: resume normal behavior, or a nudge she was mid-delivery on."""
+        if self._interrupted_nudge:
+            text, self._interrupted_nudge = self._interrupted_nudge, None
+            self.chat_controller.deliver_nudge(text)
+        else:
+            self.mascot.set_state("idle")
 
     def start_reminder_sequence(self):
         """Phase 1: Mascot walks/runs to center while playing dialog animation."""

@@ -9,6 +9,7 @@ ENV/
 
 # Configuration
 config.json
+*.db
 
 # Packaging
 build/
