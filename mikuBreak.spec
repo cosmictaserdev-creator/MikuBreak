@@ -14,6 +14,18 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+# PyInstaller's DLL scan picks up whatever _ssl.pyd / libssl / libcrypto it
+# finds first on PATH, which on this machine is an unrelated uv-managed
+# Python 3.14 install and Git's MinGW bin -- not this project's Python 3.11
+# venv. Force the matching set back in so the packaged EXE doesn't crash
+# with "DLL load failed while importing _ssl: procedure not found".
+import os
+_PY_DLLS = r'C:\Python311\DLLs'
+_correct_ssl = {name: os.path.join(_PY_DLLS, name)
+                for name in ('_ssl.pyd', 'libssl-3.dll', 'libcrypto-3.dll')}
+a.binaries = [b for b in a.binaries if os.path.basename(b[0]) not in _correct_ssl]
+a.binaries += [(name, path, 'BINARY') for name, path in _correct_ssl.items()]
+
 pyz = PYZ(a.pure)
 
 exe = EXE(
