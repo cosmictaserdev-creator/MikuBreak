@@ -14,15 +14,18 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
-# PyInstaller's DLL scan picks up whatever _ssl.pyd / libssl / libcrypto it
-# finds first on PATH, which on this machine is an unrelated uv-managed
-# Python 3.14 install and Git's MinGW bin -- not this project's Python 3.11
-# venv. Force the matching set back in so the packaged EXE doesn't crash
-# with "DLL load failed while importing _ssl: procedure not found".
+# This venv runs on a uv-managed Python 3.14.4, not the system Python.
+# Two files named libssl-3-x64.dll / libcrypto-3-x64.dll exist on this
+# machine -- the correct one next to _ssl.pyd under the uv Python's own
+# DLLs folder, and an unrelated one in Git's MinGW bin. PyInstaller's
+# dependency scan grabs the MinGW copy (earlier on PATH), which doesn't
+# match _ssl.pyd's build, crashing the packaged EXE with
+# "DLL load failed while importing _ssl: procedure not found".
+# Force the DLLs that actually match this interpreter.
 import os
-_PY_DLLS = r'C:\Python311\DLLs'
+_PY_DLLS = r'C:\Users\cosmi\AppData\Roaming\uv\python\cpython-3.14.4-windows-x86_64-none\DLLs'
 _correct_ssl = {name: os.path.join(_PY_DLLS, name)
-                for name in ('_ssl.pyd', 'libssl-3.dll', 'libcrypto-3.dll')}
+                for name in ('_ssl.pyd', 'libssl-3-x64.dll', 'libcrypto-3-x64.dll')}
 a.binaries = [b for b in a.binaries if os.path.basename(b[0]) not in _correct_ssl]
 a.binaries += [(name, path, 'BINARY') for name, path in _correct_ssl.items()]
 
