@@ -8,6 +8,10 @@ import subprocess
 import time
 import webbrowser
 
+from screen.capture import (
+    get_foreground_window_title, get_ui_elements, format_ui_elements, capture_screenshot,
+)
+
 TOOL_SCHEMAS = [
     {
         "type": "function",
@@ -287,11 +291,24 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "run_command",
-            "description": "Run a shell command on the user's PC. The user is shown the exact command and must approve it first — use only when no other tool fits, and keep commands short and safe.",
+            "description": "Run a short shell command. You MUST ask the user for approval first in your reply before calling this.",
             "parameters": {
                 "type": "object",
-                "properties": {"command": {"type": "string", "description": "the exact shell command"}},
+                "properties": {
+                    "command": {"type": "string"},
+                },
                 "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "capture_screen",
+            "description": "Take a screenshot of the current screen and describe what you see. Use this when the user asks about their screen, what's on screen, what they're looking at, or any visual question about the current display.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
             },
         },
     },
@@ -495,6 +512,18 @@ def _run_command(command: str, actions) -> str:
     return result[:2000]
 
 
+def _capture_screen(actions) -> str:
+    """Capture a screenshot and return the path + UI context.
+    The LLM client calls ask_screen() on the result to get a vision description."""
+    title = get_foreground_window_title()
+    elements = get_ui_elements()
+    ui_context = format_ui_elements(elements)
+    image_path = capture_screenshot()
+    if not image_path:
+        return "failed to capture screenshot"
+    return json.dumps({"image_path": image_path, "ui_context": ui_context, "window_title": title})
+
+
 def dispatch(name: str, args: dict, store, actions=None) -> str:
     try:
         return _dispatch(name, args, store, actions)
@@ -581,4 +610,6 @@ def _dispatch(name: str, args: dict, store, actions) -> str:
         return "focus mode isn't available right now"
     if name == "run_command":
         return _run_command(args["command"], actions)
+    if name == "capture_screen":
+        return _capture_screen(actions)
     return "unknown tool"

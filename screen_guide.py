@@ -1,16 +1,15 @@
 import os
 import re
 
-from PyQt6.QtCore import QObject, QThread, pyqtSignal, QUrl, QTimer
-from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PyQt6.QtCore import QObject, QThread, pyqtSignal, QTimer
 
 from brain.llm_client import LLMClient
 from voice.tts import get_speaker
+from voice.player import SpeechPlayer
 from stt.groq_whisper import PushToTalk, WhisperTranscriber
 from screen.capture import get_foreground_window_title, get_ui_elements, format_ui_elements, capture_screenshot
 from screen_overlay import PointMarker
 from chat_controller import _read_duration_ms
-from audio_devices import apply_output_device
 
 POINT_NUM = r"-?\d+(?:\.\d+)?"
 POINT_TAG_RE = re.compile(rf"\[POINT:\s*({POINT_NUM})\s*,\s*({POINT_NUM})\s*:\s*([^\]]+)\]")
@@ -27,24 +26,25 @@ class ScreenGuideWorker(QThread):
     succeeded = pyqtSignal(str, object, str, str)  # answer (tag stripped), (x,y) or None, audio path, screenshot path
     failed = pyqtSignal(str)
 
-    def __init__(self, llm_client, transcriber, speaker, wav_path):
+    def __init__(self, llm_client, transcriber, speaker, audio):
         super().__init__()
         self.llm_client = llm_client
         self.transcriber = transcriber
         self.speaker = speaker
-        self.wav_path = wav_path
+        self.audio = audio
 
     def run(self):
         try:
-            question = self.transcriber.transcribe(self.wav_path)
+            question = self.transcriber.transcribe(self.audio)
         except Exception as e:
             self.failed.emit(f"Couldn't hear that clearly. ({e})")
             return
         finally:
-            try:
-                os.remove(self.wav_path)
-            except OSError:
-                pass
+            if isinstance(self.audio, str):
+                try:
+                    os.remove(self.audio)
+                except OSError:
+                    pass
 
         if not question.strip():
             self.failed.emit("Didn't catch anything.")
@@ -109,10 +109,8 @@ class ScreenGuideController(QObject):
 
         self.marker = PointMarker()
 
-        self.player = QMediaPlayer()
-        self.audio_output = QAudioOutput()
-        apply_output_device(self.audio_output, config)
-        self.player.setAudioOutput(self.audio_output)
+        self.speech = SpeechPlayer(config)
+        self.speech.finished.connect(self._finish_talking)
 
         self._worker = None
         self._skip_next = False
@@ -135,7 +133,7 @@ class ScreenGuideController(QObject):
     def _on_recorded(self, wav_path):
         if self._skip_next:
             self._skip_next = False
-            if wav_path:
+            if wav_path and isinstance(wav_path, str):
                 try:
                     os.remove(wav_path)
                 except OSError:
@@ -181,31 +179,13 @@ class ScreenGuideController(QObject):
             self.pill.show_response(text)
 
         if audio_path:
-            try:
-                self.player.mediaStatusChanged.disconnect(self._on_media_status)
-            except TypeError:
-                pass
-            self._current_audio_path = audio_path
-            self.player.mediaStatusChanged.connect(self._on_media_status)
-            self.player.setSource(QUrl.fromLocalFile(audio_path))
-            self.player.play()
+            self.speech.play(audio_path)
         else:
             QTimer.singleShot(_read_duration_ms(text), self._finish_talking)
 
     def _finish_talking(self):
         self.mascot.set_state("idle")
         self.pill.return_to_idle()
-
-    def _on_media_status(self, status):
-        if status == QMediaPlayer.MediaStatus.EndOfMedia:
-            self.player.mediaStatusChanged.disconnect(self._on_media_status)
-            self.player.stop()
-            try:
-                os.remove(self._current_audio_path)
-            except OSError:
-                pass
-            self._current_audio_path = None
-            self._finish_talking()
 
     def stop(self):
         self.push_to_talk.stop()

@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 from brain.tools import TOOL_SCHEMAS, WRITE_TOOLS, dispatch
 
 OPENCODE_BASE_URL = "https://opencode.ai/zen/v1"
@@ -14,54 +15,28 @@ estimate from the image, use whole pixels — integers only, no decimals).
 Only include the tag when pointing is actually useful.
 """
 
-SYSTEM_PROMPT = """You are Miku, a small, cheerful desktop companion who lives on the user's screen.
-You genuinely care about the person you're helping — you're warm, a little playful,
-and quick with encouragement, but never over-the-top or exhausting about it.
+SYSTEM_PROMPT = """You are Miku, a cheerful desktop companion on the user's screen.
+Speak in short natural sentences. Be warm and playful but read the room.
 
-Voice and manner:
-- Speak in short, natural sentences — you're a companion having a conversation, not
-  a narrator or a search engine.
-- Be curious and a little bubbly, but read the room: if the user seems busy, stressed,
-  or terse, dial the energy down and just help.
-- You can be affectionately teasing in a light way, but never sarcastic at the
-  user's expense, and never guilt-trip them about habits or reminders they've missed.
-- When reminding or nudging, be gentle and brief — a nudge, not a lecture.
+Tool rules:
+- ONLY call action tools (open_app, set_timer, media_control, etc.) when the user CURRENTLY asks.
+- NEVER repeat actions from a previous turn unless asked again.
+- For casual chat, greetings, questions — just talk, no tools.
+- query_memory, search_conversations, save_memory are OK anytime.
+- Use capture_screen when the user asks about their screen, what's on screen, or what they're looking at.
 
-Tool rules — read these carefully:
-- ONLY call action tools (open_app, open_url, set_timer, media_control, etc.) when the
-  user's CURRENT message explicitly asks you to do that specific thing. Do NOT repeat
-  actions from previous turns — if you already opened YouTube, don't open it again
-  unless the user asks.
-- For casual conversation, greetings, questions, or opinions — just chat. No tools needed.
-- query_memory and search_conversations are OK to use proactively when context might help.
-- save_memory is OK when the user shares something worth remembering.
+Available tools: get_current_time, set_timer, list_timers, cancel_timer, list_reminders,
+open_app, open_path, open_url, search_files, list_folder, read_text_file, read_clipboard,
+get_active_window, list_windows, media_control, start_focus, end_focus, focus_status,
+search_conversations, query_memory, save_memory, create_reminder, update_habit, run_command,
+capture_screen.
 
-Memory:
-- Call query_memory BEFORE answering something that might depend on prior context.
-- Call save_memory when the user shares a preference, fact, or recurring context
-  worth keeping. Don't narrate saving — just do it and reply naturally.
-- Call create_reminder / update_habit when they ask to be reminded or tracked.
-
-System access — you have real tools on this PC:
-- Time & timers: get_current_time; set_timer; list_timers; cancel_timer; list_reminders.
-- Opening things: open_app ("open spotify"), open_path (files/folders), open_url (websites).
-  ONLY when the user explicitly asks to open something.
-- Finding things: search_files, list_folder, read_text_file.
-- Awareness: get_active_window, list_windows, read_clipboard, get_system_info.
-- Media: media_control (play_pause, next, prev, volume_up, volume_down, mute).
-  ONLY when the user asks to control media.
-- Focus: start_focus, focus_status, end_focus.
-- Conversation history: search_conversations for past chats.
-- Dropped files: summarize file contents when the user drops a file on you.
-- Shell: run_command (user must approve first, short commands only).
-
-Boundaries:
-- You are a helpful companion, not a replacement for professional advice.
-- Keep responses short by default; expand only when asked for detail.
+Keep responses short. Only expand when asked for detail.
 """
 
-MAX_TOOL_ITERATIONS = 8
+MAX_TOOL_ITERATIONS = 4
 MAX_WRITES_PER_TURN = 3
+MAX_RESPONSE_TOKENS = 512
 
 
 class LLMClient:
@@ -159,6 +134,22 @@ class LLMClient:
                     if name in WRITE_TOOLS:
                         writes_this_turn += 1
 
+                if name == "capture_screen" and result.startswith("{"):
+                    try:
+                        data = json.loads(result)
+                        if "image_path" in data:
+                            vision_answer = self.ask_screen(
+                                prompt, data.get("ui_context", ""),
+                                data.get("image_path"),
+                            )
+                            result = vision_answer
+                            try:
+                                os.remove(data["image_path"])
+                            except OSError:
+                                pass
+                    except Exception:
+                        pass
+
                 messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
 
         return "Sorry, got a little tangled up thinking about that."
@@ -172,6 +163,7 @@ class LLMClient:
             tools=TOOL_SCHEMAS,
             tool_choice="auto",
             stream=True,
+            max_tokens=MAX_RESPONSE_TOKENS,
         )
         content_parts = []
         acc = {}  # tool-call index -> {"id", "name", "arguments"}

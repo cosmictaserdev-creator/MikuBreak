@@ -248,36 +248,34 @@ class MemoryStore:
 
     # -- context injection --------------------------------------------------------
 
-    def get_context_snippet(self, max_memories: int = 8) -> str:
-        """Short summary of what's relevant right now, for the LLM system prompt. Not a full DB dump."""
+    def get_context_snippet(self, max_memories: int = 5) -> str:
+        """Short summary of what's relevant right now, for the LLM system prompt."""
         parts = []
 
-        reminders = self.get_active_reminders()[:5]
+        reminders = self.get_active_reminders()[:3]
         if reminders:
-            lines = [f"- \"{r['text']}\" due {r['due_at']}" for r in reminders]
-            parts.append("Active reminders:\n" + "\n".join(lines))
+            lines = [f"- {r['text']} (due {r['due_at']})" for r in reminders]
+            parts.append("Reminders:\n" + "\n".join(lines))
 
-        habits = [h for h in self.get_habits() if not h["is_paused"]]
+        habits = [h for h in self.get_habits() if not h["is_paused"]][:3]
         if habits:
             lines = [f"- {h['name']} (every {h['target_interval_minutes']}min)" for h in habits]
-            parts.append("Tracked habits:\n" + "\n".join(lines))
+            parts.append("Habits:\n" + "\n".join(lines))
 
-        # Conversation summaries (auto-generated, high value for context)
         summaries = self._conn.execute(
             "SELECT content FROM memories WHERE category = 'conversation_summary' "
-            "ORDER BY created_at DESC LIMIT 3"
+            "ORDER BY created_at DESC LIMIT 2"
         ).fetchall()
         if summaries:
-            lines = [f"- {r['content']}" for r in summaries]
-            parts.append("Recent conversation summaries:\n" + "\n".join(lines))
+            lines = [f"- {r['content'][:150]}" for r in summaries]
+            parts.append("Past conversations:\n" + "\n".join(lines))
 
-        # Other memories (exclude summaries to avoid duplication)
         memories = self._conn.execute(
             "SELECT category, content FROM memories WHERE category != 'conversation_summary' "
             "ORDER BY importance DESC, created_at DESC LIMIT ?", (max_memories,)
         ).fetchall()
         if memories:
-            lines = [f"- [{m['category']}] {m['content']}" for m in memories]
-            parts.append("Things you remember about the user:\n" + "\n".join(lines))
+            lines = [f"- [{m['category']}] {m['content'][:100]}" for m in memories]
+            parts.append("User info:\n" + "\n".join(lines))
 
         return "\n\n".join(parts)

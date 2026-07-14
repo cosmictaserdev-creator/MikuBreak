@@ -19,6 +19,7 @@ from screen_guide import ScreenGuideController
 from pill import MikuPill
 from idle_chatter import IdleChatter
 from dictation import DictationController
+from stt.groq_whisper import warmup_mic
 
 def resource_path(relative_path):
     """ Get absolute path to resource, works for dev and for PyInstaller """
@@ -78,6 +79,8 @@ class ScreenPalApp:
         self.idle_chatter.start()
         self.dictation = DictationController(self.config, mascot=self.mascot, pill=self.pill)
         self._interrupted_nudge = None
+
+        warmup_mic(self.config)
 
         # Set initial timer display after a small delay to ensure UI is ready
         QTimer.singleShot(200, self.set_initial_timer)
@@ -287,7 +290,7 @@ class ScreenPalApp:
         interrupted = self.chat_controller.interrupt()
         if interrupted:
             self._interrupted_nudge = interrupted
-        self.screen_guide.player.stop()
+        self.screen_guide.speech.stop()
         # ponytail: no dedicated startled/dizzy sprite frames exist yet — reuse the
         # single "turn" frame as a quick flinch. Swap in real frames if art shows up.
         self.mascot.set_state("turn")

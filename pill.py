@@ -330,6 +330,7 @@ class MikuPill(QWidget):
         self.update()
 
     def start_thinking(self):
+        self._dismiss_timer.stop()
         if self._mode == "chat":
             self._set_status("thinking")
             return
@@ -474,6 +475,11 @@ class MikuPill(QWidget):
             return
         self._mode = "idle"
         self._resize_to(self.IDLE_WIDTH, self.IDLE_HEIGHT)
+
+    def hold_open(self):
+        """Cancel the dismiss timer — used while TTS audio is playing so the
+        chat panel doesn't close before she finishes speaking."""
+        self._dismiss_timer.stop()
 
     # -- painting --------------------------------------------------------
 

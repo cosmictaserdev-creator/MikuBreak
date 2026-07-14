@@ -1,5 +1,4 @@
-import os
-import tempfile
+import io
 import wave
 from collections import deque
 
@@ -9,14 +8,38 @@ from groq import Groq
 from PyQt6.QtCore import Qt, QObject, QTimer, pyqtSignal
 from PyQt6.QtGui import QGuiApplication
 
-from audio_devices import resolve_input_device, best_input_device
+from audio_devices import resolve_input_device, best_input_device, _is_junk
 from hotkeys import HotkeyPoller
 
 SAMPLE_RATE = 16000
 
 
 SILENT_PEAK = 10  # int16 peak below this after the watchdog window = dead capture device
-WATCHDOG_MS = 500
+WATCHDOG_MS = 1500  # Bluetooth HFP mics often take >500ms to start delivering audio after open
+NORMALIZE_TARGET = 26000  # boost quiet mics (weak headphone mics etc.) to this peak before Whisper
+WARMUP_MS = 1000  # how long to hold the warmup stream open for BT handshake to settle
+
+
+def warmup_mic(config=None):
+    """Opens the configured (or best-guess) input device once at app startup and
+    closes it shortly after, so a Bluetooth mic's HFP handshake is already done
+    by the time the user's first real recording starts — instead of eating into
+    that recording via the watchdog fallback."""
+    device = resolve_input_device(config.get("mic_device")) if config else best_input_device()
+    try:
+        stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16", device=device)
+        stream.start()
+    except Exception:
+        return
+
+    def _close():
+        try:
+            stream.stop()
+            stream.close()
+        except Exception:
+            pass
+
+    QTimer.singleShot(WARMUP_MS, _close)
 
 
 class Recorder(QObject):
@@ -50,16 +73,16 @@ class Recorder(QObject):
     def _fallback_candidates(self, device):
         auto = best_input_device()
         cands = [device, Recorder._known_good, auto]
+        # Add all input devices as fallbacks — the watchdog will skip silent ones
         try:
             for i, d in enumerate(sd.query_devices()):
-                if d["max_input_channels"] > 0 and any(
-                        k in d["name"] for k in ("Microphone Array", "Microphone", "Headset")):
+                if d["max_input_channels"] > 0 and not _is_junk(d["name"]):
                     cands.append(i)
         except Exception:
             pass
         seen, out = set(), []
         for c in cands:
-            if c not in seen:
+            if c is not None and c not in seen:
                 seen.add(c)
                 out.append(c)
         return out
@@ -71,6 +94,8 @@ class Recorder(QObject):
             device = self._candidates.pop(0)
             try:
                 self._frames = []
+                dev_name = sd.query_devices(device)["name"] if device is not None else "(system default)"
+                print(f"[miku] mic: opening device {device} — {dev_name}")
                 self._stream = sd.InputStream(
                     samplerate=SAMPLE_RATE, channels=1, dtype="int16", device=device,
                     callback=self._on_audio, blocksize=2048
@@ -112,22 +137,30 @@ class Recorder(QObject):
         # int16 speech RMS runs ~300-4000; normalize so bars move with voice, not just noise
         self._levels.append(min(1.0, (rms / 32768.0) * 18.0))
 
-    def stop(self) -> str:
+    def stop(self) -> str | tuple:
         self._poll_timer.stop()
         self._watchdog.stop()
         self._flush_levels()
         self._close_stream()
         if not self._frames:
+            print("[miku] mic: no frames captured")
             return ""
         audio = np.concatenate(self._frames, axis=0)
-        fd, path = tempfile.mkstemp(suffix=".wav")
-        os.close(fd)
-        with wave.open(path, "wb") as wf:
+        peak = int(np.abs(audio).max())
+        duration = len(audio) / SAMPLE_RATE
+        print(f"[miku] mic: {len(audio)} samples, {duration:.1f}s, peak={peak}")
+        # Weak mics (e.g. some headphone mics) pass the dead-stream check but are too
+        # quiet for Whisper to transcribe reliably (it hallucinates "." on faint audio).
+        # Boost gain to a healthy peak instead of sending it as-is.
+        if 0 < peak < NORMALIZE_TARGET:
+            audio = (audio.astype(np.float32) * (NORMALIZE_TARGET / peak)).astype(np.int16)
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wf:
             wf.setnchannels(1)
             wf.setsampwidth(2)
             wf.setframerate(SAMPLE_RATE)
             wf.writeframes(audio.tobytes())
-        return path
+        return ("audio.wav", buf.getvalue(), "audio/wav")
 
 
 class WhisperTranscriber:
@@ -143,24 +176,22 @@ class WhisperTranscriber:
             self._client = Groq(api_key=key)
         return self._client
 
-    def transcribe(self, wav_path: str) -> str:
+    def transcribe(self, audio) -> str:
         client = self._get_client()
-        with open(wav_path, "rb") as f:
-            result = client.audio.transcriptions.create(
-                file=(os.path.basename(wav_path), f.read()),
-                model="whisper-large-v3-turbo",
-            )
+        result = client.audio.transcriptions.create(
+            file=audio,
+            model="whisper-large-v3-turbo",
+        )
         return result.text
 
 
 class PushToTalk(QObject):
-    """Hold a hotkey combo to record, release to stop. VK polling (HotkeyPoller)
-    instead of pynput GlobalHotKeys — pynput can't match <ctrl>+<alt>+letter combos
-    (no character produced with both mods held), and it fired callbacks off the GUI
-    thread, which silently broke the recorder's amplitude QTimer."""
+    """Hold a hotkey combo to record, release to stop. Uses RegisterHotKey for
+    event-driven activation + lightweight polling for release detection.
+    Builds WAV in memory (no disk I/O) and passes bytes directly to Groq."""
 
     started = pyqtSignal()
-    finished = pyqtSignal(str)
+    finished = pyqtSignal(object)
     amplitude = pyqtSignal(float)
 
     def __init__(self, hotkey_str: str, config=None):

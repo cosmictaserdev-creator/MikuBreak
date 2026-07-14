@@ -10,9 +10,22 @@ VK_CONTROL = 0x11
 VK_V = 0x56
 
 
-def _win_paste(text: str):
-    """Set clipboard and simulate Ctrl+V using Win32 keybd_event — more reliable than
-    pynput's Controller on Windows, where scan-code events often get swallowed."""
+def _get_foreground_hwnd():
+    user32 = ctypes.windll.user32
+    return user32.GetForegroundWindow()
+
+
+def _restore_foreground(hwnd):
+    if hwnd:
+        ctypes.windll.user32.SetForegroundWindow(hwnd)
+
+
+def _win_paste(text: str, restore_hwnd=None):
+    """Set clipboard and simulate Ctrl+V. Restores the previously-focused window
+    so the paste lands in the user's text editor, not Miku's window."""
+    if restore_hwnd:
+        _restore_foreground(restore_hwnd)
+
     clipboard = QApplication.clipboard()
     previous = clipboard.text()
     clipboard.setText(text)
@@ -31,22 +44,23 @@ class DictationWorker(QThread):
     transcribed = pyqtSignal(str)
     failed = pyqtSignal(str)
 
-    def __init__(self, transcriber, wav_path):
+    def __init__(self, transcriber, audio):
         super().__init__()
         self.transcriber = transcriber
-        self.wav_path = wav_path
+        self.audio = audio
 
     def run(self):
         try:
-            text = self.transcriber.transcribe(self.wav_path)
+            text = self.transcriber.transcribe(self.audio)
         except Exception as e:
             self.failed.emit(str(e))
             return
         finally:
-            try:
-                os.remove(self.wav_path)
-            except OSError:
-                pass
+            if isinstance(self.audio, str):
+                try:
+                    os.remove(self.audio)
+                except OSError:
+                    pass
 
         if text.strip():
             self.transcribed.emit(text.strip())
@@ -63,6 +77,7 @@ class DictationController(QObject):
         self.pill = pill
         self.transcriber = WhisperTranscriber(config)
         self._worker = None
+        self._foreground_hwnd = None
 
         self.push_to_talk = PushToTalk(config.get("dictation_hotkey"), config)
         if self.pill:
@@ -72,6 +87,7 @@ class DictationController(QObject):
         self.push_to_talk.start()
 
     def _on_started(self):
+        self._foreground_hwnd = _get_foreground_hwnd()
         if self.mascot:
             self.mascot.reset_roaming()
             self.mascot.set_state("wondering_right")
@@ -95,7 +111,8 @@ class DictationController(QObject):
         self._worker.start()
 
     def _on_transcribed(self, text):
-        _win_paste(text)
+        _win_paste(text, restore_hwnd=self._foreground_hwnd)
+        self._foreground_hwnd = None
         if self.mascot:
             self.mascot.set_state("idle")
         if self.pill:

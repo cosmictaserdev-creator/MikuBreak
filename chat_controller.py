@@ -3,14 +3,13 @@ import threading
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
-from PyQt6.QtCore import QObject, QThread, pyqtSignal, QUrl, QTimer
-from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PyQt6.QtCore import QObject, QThread, pyqtSignal, QTimer
 from PyQt6.QtWidgets import QMessageBox
 
 from brain.llm_client import LLMClient
 from voice.tts import get_speaker
+from voice.player import SpeechPlayer
 from stt.groq_whisper import PushToTalk, WhisperTranscriber
-from audio_devices import apply_output_device
 from hotkeys import HotkeyPoller
 from focus_mode import FocusMode
 
@@ -86,22 +85,23 @@ class TranscribeWorker(QThread):
     transcribed = pyqtSignal(str)
     failed = pyqtSignal(str)
 
-    def __init__(self, transcriber, wav_path):
+    def __init__(self, transcriber, audio):
         super().__init__()
         self.transcriber = transcriber
-        self.wav_path = wav_path
+        self.audio = audio
 
     def run(self):
         try:
-            text = self.transcriber.transcribe(self.wav_path)
+            text = self.transcriber.transcribe(self.audio)
         except Exception as e:
             self.failed.emit(f"Couldn't hear that clearly. ({e})")
             return
         finally:
-            try:
-                os.remove(self.wav_path)
-            except OSError:
-                pass
+            if isinstance(self.audio, str):
+                try:
+                    os.remove(self.audio)
+                except OSError:
+                    pass
 
         if not text.strip():
             self.failed.emit("Didn't catch anything.")
@@ -193,10 +193,8 @@ class ChatController(QObject):
 
         self.pill.submitted.connect(self.handle_prompt)
 
-        self.player = QMediaPlayer()
-        self.audio_output = QAudioOutput()
-        apply_output_device(self.audio_output, config)
-        self.player.setAudioOutput(self.audio_output)
+        self.speech = SpeechPlayer(config)
+        self.speech.finished.connect(self._finish_talking)
 
         self._worker = None
         self._nudge_worker = None
@@ -359,7 +357,12 @@ class ChatController(QObject):
         )
 
     def handle_prompt(self, text):
-        self.mascot.set_state("wondering_left")  # "thinking"
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.blockSignals(True)
+            self._worker.quit()
+            self._worker.wait(1500)
+
+        self.mascot.set_state("wondering_left")
         self.pill.start_thinking()
         speaker = get_speaker(self.config)
         history = self.history[-self.MAX_HISTORY_TURNS * 2:]
@@ -407,8 +410,7 @@ class ChatController(QObject):
     def interrupt(self):
         """Shake-to-pause: stop whatever she's doing right now. Returns the text of a
         reminder/habit nudge that got cut off mid-delivery, or None if it wasn't a nudge."""
-        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
-            self.player.stop()
+        self.speech.stop()
         interrupted = self._active_nudge_text
         self._active_nudge_text = None
         self.pill.return_to_idle()
@@ -421,14 +423,12 @@ class ChatController(QObject):
         self._nudge_worker.start()
 
     def _say(self, text, audio_path):
-        self.mascot.set_state("dialog")  # "talking"
+        self.mascot.set_state("dialog")
         self.pill.show_response(text)
 
         if audio_path:
-            cleanup = self._make_cleanup(audio_path)
-            self.player.mediaStatusChanged.connect(cleanup)
-            self.player.setSource(QUrl.fromLocalFile(audio_path))
-            self.player.play()
+            self.pill.hold_open()
+            self.speech.play(audio_path)
         else:
             QTimer.singleShot(_read_duration_ms(text), self._finish_talking)
 
@@ -436,18 +436,6 @@ class ChatController(QObject):
         self._active_nudge_text = None
         self.mascot.set_state("idle")
         self.pill.return_to_idle()
-
-    def _make_cleanup(self, path):
-        def cleanup(status):
-            if status == QMediaPlayer.MediaStatus.EndOfMedia:
-                self.player.mediaStatusChanged.disconnect(cleanup)
-                self.player.stop()
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
-                self._finish_talking()
-        return cleanup
 
     def stop(self):
         self._hotkey.stop()

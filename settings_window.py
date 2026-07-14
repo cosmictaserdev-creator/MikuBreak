@@ -1,23 +1,25 @@
 import os
 import sys
+import numpy as np
+import sounddevice as sd
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QPushButton, QFrame,
     QCheckBox, QLineEdit, QListWidget, QListWidgetItem, QStackedWidget,
     QTextEdit, QMessageBox, QRadioButton, QButtonGroup, QScrollArea, QComboBox
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QUrl
-from PyQt6.QtGui import QIcon
-from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer
+from PyQt6.QtGui import QIcon, QPainter, QColor, QLinearGradient, QPixmap
 
 from config import ConfigManager
 from memory.store import MemoryStore
 from voice.tts import get_speaker
-from audio_devices import list_input_devices, list_output_devices, apply_output_device
+from voice.player import SpeechPlayer
+from audio_devices import list_input_devices, list_output_devices, best_input_device
 
 STYLE = """
 QWidget { color: #959bb5; font-family: 'DM Serif Display', serif; background: transparent; }
-QWidget#root { background-color: #0a1123; }
+QWidget#root { }
 QFrame#sidebar { background-color: #12172b; border-right: 1px solid #2a2f4d; }
 QLabel#navItem { font-size: 14px; font-weight: 700; color: #959bb5; padding: 10px 16px; }
 QLabel#pageTitle { color: #8387c4; font-size: 22px; font-weight: 900; }
@@ -53,6 +55,81 @@ QFrame#divider { background-color: #2a2f4d; min-height: 1px; max-height: 1px; }
 NAV_SECTIONS = ["General", "Voice", "Brain", "Memory & Reminders", "Screen Guide", "Chatter", "Gestures", "Shortcuts", "About"]
 
 
+class MicTestMeter(QWidget):
+    """Live mic level bar. Open a sounddevice stream on the selected device,
+    compute RMS per frame, paint a horizontal bar that fills with colour."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(22)
+        self.setMinimumWidth(200)
+        self._level = 0.0
+        self._stream = None
+        self._device = None
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(30)
+        self._timer.timeout.connect(self.update)
+
+    def start(self, device_index):
+        self.stop()
+        self._device = device_index
+        try:
+            self._stream = sd.InputStream(
+                samplerate=16000, channels=1, dtype="int16",
+                device=device_index, callback=self._on_audio, blocksize=1024,
+            )
+            self._stream.start()
+            self._timer.start()
+        except Exception:
+            self._stream = None
+
+    def stop(self):
+        self._timer.stop()
+        self._level = 0.0
+        if self._stream:
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception:
+                pass
+            self._stream = None
+        self.update()
+
+    def _on_audio(self, indata, frames, time_info, status):
+        rms = float(np.sqrt(np.mean(indata.astype(np.float32) ** 2)))
+        self._level = min(1.0, (rms / 32768.0) * 18.0)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = self.rect()
+
+        bg = QColor("#1a1e2e")
+        p.setBrush(bg)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRoundedRect(rect, 6, 6)
+
+        if self._level > 0.001:
+            fill_w = max(4, int(rect.width() * self._level))
+            fill_rect = rect.adjusted(2, 2, -(rect.width() - fill_w - 2), -2)
+
+            if self._level < 0.3:
+                color = QColor("#8387c4")
+            elif self._level < 0.7:
+                color = QColor("#e0af68")
+            else:
+                color = QColor("#F7768E")
+
+            grad = QLinearGradient(0, 0, fill_rect.width(), 0)
+            grad.setColorAt(0, color)
+            grad.setColorAt(1, color.darker(130))
+            p.setBrush(grad)
+            p.drawRoundedRect(fill_rect, 4, 4)
+
+        p.end()
+
+
 class SettingsWindow(QWidget):
     settings_changed = pyqtSignal()
 
@@ -64,7 +141,7 @@ class SettingsWindow(QWidget):
         # side effects that must run when a staged key is actually saved
         self._on_save_effects = {
             "run_at_startup": lambda v: self._handle_startup_registry(v),
-            "speaker_device": lambda v: apply_output_device(self.audio_output, self.config),
+            "speaker_device": lambda v: self.speech.set_output_device(self.config),
         }
 
         self.setObjectName("root")
@@ -77,12 +154,24 @@ class SettingsWindow(QWidget):
         self.resize(760, 560)
         self.setStyleSheet(STYLE)
 
-        self.player = QMediaPlayer()
-        self.audio_output = QAudioOutput()
-        apply_output_device(self.audio_output, config)
-        self.player.setAudioOutput(self.audio_output)
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        bg_path = os.path.join(script_dir, "assests", "bg.jpg")
+        self._bg_pixmap = QPixmap(bg_path) if os.path.exists(bg_path) else None
+
+        self.speech = SpeechPlayer(config)
 
         self._build_ui()
+
+    def paintEvent(self, event):
+        if self._bg_pixmap and not self._bg_pixmap.isNull():
+            painter = QPainter(self)
+            scaled = self._bg_pixmap.scaled(
+                self.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            painter.drawPixmap((self.width() - scaled.width()) // 2, (self.height() - scaled.height()) // 2, scaled)
+            painter.fillRect(self.rect(), QColor(10, 17, 35, 175))  # dark wash so text stays readable
+        super().paintEvent(event)
 
     # -- layout scaffolding --------------------------------------------------------
 
@@ -187,6 +276,24 @@ class SettingsWindow(QWidget):
         line.setObjectName("divider")
         layout.addWidget(line)
         return page, layout
+
+    def _switch_mic_meter(self, device_name):
+        if not hasattr(self, "_mic_meter") or self._mic_meter is None:
+            return
+        if not device_name:
+            dev = best_input_device()
+        else:
+            dev = None
+            for name, idx in list_input_devices():
+                if name == device_name:
+                    dev = idx
+                    break
+            if dev is None:
+                dev = best_input_device()
+        if dev is not None:
+            self._mic_meter.start(dev)
+        else:
+            self._mic_meter.stop()
 
     def _show_saved_toast(self):
         self.toast.move(self.stack.width() - self.toast.width() - 20, 16)
@@ -344,7 +451,14 @@ class SettingsWindow(QWidget):
 
         layout.addWidget(QLabel("Microphone"))
         mic_names = [name for name, _ in list_input_devices()]
-        layout.addWidget(self._device_combo("mic_device", mic_names))
+        mic_combo = self._device_combo("mic_device", mic_names)
+        layout.addWidget(mic_combo)
+
+        self._mic_meter = MicTestMeter()
+        layout.addWidget(self._mic_meter)
+
+        mic_combo.currentIndexChanged.connect(lambda i: self._switch_mic_meter(mic_combo.itemData(i)))
+        QTimer.singleShot(0, lambda: self._switch_mic_meter(mic_combo.currentData()))
 
         layout.addWidget(QLabel("Speaker"))
         speaker_names = [name for name, _ in list_output_devices()]
@@ -426,8 +540,7 @@ class SettingsWindow(QWidget):
         except Exception as e:
             QMessageBox.warning(self, "Voice test failed", str(e))
             return
-        self.player.setSource(QUrl.fromLocalFile(path))
-        self.player.play()
+        self.speech.play(path)
 
     # -- Brain --------------------------------------------------------
 
@@ -680,6 +793,11 @@ class SettingsWindow(QWidget):
             if e.type() == e.Type.KeyPress:
                 k = e.key()
                 mods = e.modifiers()
+                if k in (Qt.Key.Key_Control, Qt.Key.Key_Alt, Qt.Key.Key_Shift, Qt.Key.Key_Meta):
+                    # Bare modifier — keep the keyboard grabbed and wait for the
+                    # real key, however late it arrives while this is held.
+                    e.accept()
+                    return
                 parts = []
                 if mods & Qt.KeyboardModifier.ControlModifier:
                     parts.append("<ctrl>")
@@ -689,15 +807,14 @@ class SettingsWindow(QWidget):
                     parts.append("<shift>")
                 if mods & Qt.KeyboardModifier.MetaModifier:
                     parts.append("<win>")
-                if k not in (Qt.Key.Key_Control, Qt.Key.Key_Alt, Qt.Key.Key_Shift, Qt.Key.Key_Meta):
-                    key_name = {
-                        Qt.Key.Key_Space: "space",
-                        Qt.Key.Key_Return: "enter",
-                        Qt.Key.Key_Tab: "tab",
-                        Qt.Key.Key_Escape: "esc",
-                    }.get(k, e.text().lower() or chr(k).lower() if 32 <= k < 256 else "")
-                    if key_name:
-                        parts.append(key_name)
+                key_name = {
+                    Qt.Key.Key_Space: "space",
+                    Qt.Key.Key_Return: "enter",
+                    Qt.Key.Key_Tab: "tab",
+                    Qt.Key.Key_Escape: "esc",
+                }.get(k, e.text().lower() or chr(k).lower() if 32 <= k < 256 else "")
+                if key_name:
+                    parts.append(key_name)
                 combo = "+".join(parts)
                 if combo:
                     btn.setText(combo)
@@ -748,6 +865,8 @@ class SettingsWindow(QWidget):
         self._apply_pending()
 
     def closeEvent(self, event):
+        if hasattr(self, "_mic_meter"):
+            self._mic_meter.stop()
         if self._pending:
             result = QMessageBox.question(
                 self, "Unsaved changes",
